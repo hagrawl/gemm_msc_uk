@@ -1,1 +1,190 @@
 This is a README file for Compute Engine Block.
+
+Great. Before touching pe.v, let's build a solid understanding of the Processing Element (PE) in a systolic-array GEMM accelerator. This is the right starting point because the PE determines the arithmetic behavior that the entire array relies on.
+
+I'll explain the standard PE first. We'll then compare it against your actual RTL so we don't assume your implementation has signals or behavior it doesn't.
+1. What is a Processing Element (PE)?
+A Processing Element (PE) is a small hardware unit that performs a computation on input data, maintains intermediate results, and passes data to neighboring PEs.
+
+For GEMM, its primary operation is a multiply-accumulate (MAC):
+\[
+acc_{\text{next}} = acc_{\text{current}} + A_{\text{in}}\times B_{\text{in}}
+\]
+
+For matrix multiplication:
+\[
+C=A\times B
+\]
+
+each output element is calculated as:
+\[
+C_{i,j}=\sum_{k=0}^{K-1} A_{i,k}B_{k,j}
+\]
+
+A PE computes one or more terms of this sum over successive clock cycles.
+
+
+
+
+
+
+
+chipinsights.net
+
+
+Conceptually, a PE has three responsibilities:
+1. Multiply its two operands.
+2. Accumulate the product into a partial sum.
+3. Forward operands to neighboring PEs when required by the array architecture.
+Not every PE implementation uses exactly the same interface or dataflow. The details depend on your design.
+2. What are the inputs and outputs of a PE?
+A conventional systolic-array PE might have the following interface.
+Inputs
+Signal	Typical purpose
+clk	Clock signal; synchronizes the PE's sequential operations
+rst / reset	Initializes registers and control state
+a_in	Input operand from the left or another upstream source
+b_in	Input operand from above or another upstream source
+valid_in	Indicates that the incoming operands should be processed
+clear / acc_clear	Clears the accumulator before a new computation
+enable	Enables computation or state updates, if supported
+
+The clock, reset, valid, clear and enable signals are common possibilities, not a guaranteed list for your particular PE.
+Understanding the operands
+Suppose the PE receives:
+\[
+A_{\text{in}}=3,\qquad B_{\text{in}}=4
+\]
+
+The multiplier generates:
+\[
+P=3\times4=12
+\]
+
+The accumulator adds this product to its current value.
+
+If the current accumulator value is 7:
+\[
+acc_{\text{next}}=7+12=19
+\]
+
+On the next valid operation, suppose the operands are 2 and 5:
+\[
+acc_{\text{next}}=19+(2\times5)=29
+\]
+
+The accumulator therefore stores a running partial sum.
+Outputs
+Signal	Typical purpose
+a_out	Forwards the A operand to the next PE
+b_out	Forwards the B operand to the next PE
+acc_out	Exposes the current accumulated result or partial sum
+valid_out	Indicates when an output or partial sum is valid
+
+Some implementations expose the accumulator directly; others expose a result only at the end of a computation. Again, we'll verify your actual interface before deciding.
+
+Important distinction: a_out and b_out are data-propagation outputs, while acc_out is a computation-result output. They serve different purposes.
+3. How does a PE work over multiple clock cycles?
+Consider a PE whose accumulator is reset to zero and which accumulates only when valid_in = 1.
+Clock cycle	A input	B input	Valid	Product	Accumulator after edge
+Reset	—	—	—	—	0
+1	3	4	1	12	12
+2	2	5	1	10	22
+3	6	1	0	Ignored	22
+4	4	3	1	12	34
+
+The example assumes that valid_in qualifies the MAC operation and that the accumulator holds its value when valid_in = 0.
+
+The key rule is:
+\[
+acc_{t+1} =
+\begin{cases}
+0, & \text{if reset or accumulator clear is asserted}\\
+acc_t+A_tB_t, & \text{if input is valid}\\
+acc_t, & \text{otherwise}
+\end{cases}
+\]
+
+The priority between reset, clear and valid depends on the RTL specification.
+
+This is why a PE is more than just a multiplier and an adder. It is a clocked state machine for accumulating arithmetic results.
+4. How does a PE contribute to matrix multiplication?
+Let's use a small matrix example:
+\[
+A=\begin{bmatrix}1&2\\3&4\end{bmatrix},
+\qquad
+B=\begin{bmatrix}5&6\\7&8\end{bmatrix}
+\]
+
+The output is:
+\[
+C=\begin{bmatrix}19&22\\43&50\end{bmatrix}
+\]
+
+For the top-left element:
+\[
+C_{0,0}=1\times5+2\times7=19
+\]
+
+A PE responsible for this output must accumulate the two products:
+- First product: \(1\times5=5\), giving an accumulator value of 5.
+- Second product: \(2\times7=14\), giving an accumulator value of 19.
+The same principle applies to the other output elements.
+
+In a systolic array, multiple PEs perform these calculations concurrently. The array feeds operands into neighboring PEs in a carefully timed pattern, allowing many multiply-accumulate operations to take place in parallel.
+
+
+
+
+
+
+
+quadric.ai
+
+
+One subtle point: a PE's responsibility depends on the dataflow. In a conventional output-stationary design, each PE keeps its partial sum locally. Other architectures may move partial sums between PEs or use a different mapping.
+5. Other important design details
+These are the issues we'll inspect carefully when reviewing your pe.v.
+A. Bit width and overflow
+If A and B are each 8-bit signed values, their product needs up to 16 bits to represent the full mathematical product.
+
+For a dot product of length \(K\), the accumulator usually needs additional bits. A rough width estimate is:
+\[
+W_{\text{acc}}\approx W_A+W_B+\lceil\log_2 K\rceil
+\]
+
+This is a useful sizing rule for full-range signed operands, with the exact minimum depending on the supported range and rounding or saturation requirements.
+
+If the accumulator is too narrow, values may wrap around or saturate, depending on the implementation.
+B. Signed versus unsigned arithmetic
+In Verilog/SystemVerilog, operand declarations, expression sizing and signedness affect multiplication and addition.
+
+For example, a signed multiplication involving negative operands must preserve the intended two's-complement interpretation. Merely declaring the output wider does not guarantee that the expression has the desired signed behavior.
+
+We'll explicitly check this in your RTL.
+C. Data propagation and timing
+A PE might register a_out and b_out on each clock edge. If so, data advances by one cycle per PE stage.
+
+This timing is essential. If A and B arrive at a PE in different cycles, the PE may multiply operands that don't belong together.
+
+The PE's data forwarding, valid signals and accumulator update must therefore agree with the systolic array's timing.
+D. Reset and accumulator clearing
+Reset usually initializes the PE to a known state. An accumulator-clear signal may be needed to start a new matrix tile without resetting the entire array.
+
+These are not necessarily the same operation:
+- Reset: initializes the PE's registers and control state.
+- Accumulator clear: prepares the arithmetic state for a new computation while preserving normal operation.
+The precise behavior depends on the design.
+E. Valid signals
+A valid signal indicates whether the operands represent a meaningful transaction.
+
+If the PE accumulates invalid data, the output can be wrong even when the multiplier and adder are correct.
+
+A robust design must also define how valid signals propagate through the PE and how bubbles or idle cycles affect its state.
+F. Throughput and latency
+These terms are related but different:
+- Latency: the number of cycles between accepting an input operation and observing its corresponding result.
+- Throughput: how many operations the PE can accept or complete per cycle.
+A pipelined PE may have multiple cycles of latency while still accepting one valid MAC operation every cycle. A simple registered MAC may have different timing characteristics.
+
+We must derive the actual values from the RTL, not assume them.
