@@ -188,3 +188,85 @@ These terms are related but different:
 A pipelined PE may have multiple cycles of latency while still accepting one valid MAC operation every cycle. A simple registered MAC may have different timing characteristics.
 
 We must derive the actual values from the RTL, not assume them.
+
+
+
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# Pipelined Processing Element (PE) for GEMM
+
+## Overview
+
+This repository contains two parameterized, pipelined Processing Element (PE) implementations in SystemVerilog for a systolic-array GEMM (General Matrix-Matrix Multiplication) accelerator.
+
+1. **PE without Overflow Detection** — Implements signed multiplication and accumulation (MAC), operand forwarding, and pipeline valid signaling.
+2. **PE with Overflow Detection** — Extends the basic PE by detecting signed accumulator overflow.
+
+Both implementations use a two-stage pipeline and support configurable operand and accumulator widths.
+
+## Implementations
+
+### 1. PE Without Overflow Detection
+
+The basic PE performs the core operations required by a systolic-array GEMM accelerator.
+
+**Features**
+- Two-stage pipelined multiply-accumulate operation.
+- Signed multiplication and accumulation.
+- Independently configurable widths for operands A and B.
+- Valid signaling for inputs, products, and accumulator updates.
+- Operand forwarding to neighboring PEs.
+- Asynchronous active-low reset and synchronous accumulator clear.
+
+### 2. PE With Overflow Detection
+
+This version extends the basic PE with signed accumulator overflow detection while retaining its core functionality.
+
+**Additional feature**
+- Detects positive and negative signed overflow during accumulation.
+- Reports overflow through an `overflow` output signal.
+- Uses fixed-width two's-complement arithmetic; the accumulator wraps on overflow rather than saturating.
+
+For an 8-bit signed accumulator, the representable range is −128 to +127. If the mathematical sum exceeds this range, the stored result wraps around and the overflow signal indicates the event.
+
+## Pipeline Architecture
+
+Both implementations contain two main stages:
+
+1. **Stage 0 — Multiply and Capture:** Captures valid operands, computes their signed product, and registers the product.
+2. **Stage 1 — Accumulate and Forward:** Adds the registered product to the accumulator, generates output-valid signals, and forwards operands. The overflow-enabled implementation also detects signed accumulator overflow.
+
+## Parameters
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `DW_a` | 8 | Width of operand A |
+| `DW_b` | 8 | Width of operand B |
+| `Acc_ip_width` | 32 | Accumulator width |
+
+The current product-extension logic requires `Acc_ip_width >= DW_a + DW_b`.
+
+## Verification
+
+The overflow-enabled PE was tested using a self-checking SystemVerilog testbench in Vivado Simulator (XSim).
+
+**Simulation result: PASS — all 35 cycle checks passed.**
+
+The tests covered signed arithmetic, valid signaling, pipeline timing, operand forwarding, accumulator clearing, positive and negative overflow, and overflow recovery.
+
+The basic PE should also be verified using its own testbench.
+
+## Repository Structure
+
+Example organization (adjust filenames to match the repository):
+
+- `pe.sv` — PE without overflow detection
+- `pe_overflow.sv` — PE with overflow detection
+- `tb_pe_overflow.sv` — Self-checking testbench for the overflow-enabled PE
+- `README.md` — Project documentation
+
+## Purpose
+
+These modules serve as building blocks for a configurable systolic-array GEMM accelerator, which can be integrated with operand buffers, a dataflow controller, a systolic array, and an output collector.
+
