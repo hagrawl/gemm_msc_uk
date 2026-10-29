@@ -1,0 +1,3 @@
+A ping-pong buffer uses two memory banks: while one bank is being filled with new data, the other can be read by the accelerator. The roles switch when the data is ready.
+
+For your GEMM accelerator, the buffer stores matrix operands and presents them in the required order for the systolic PE array.
