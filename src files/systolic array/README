@@ -1,0 +1,785 @@
+# GEMM Systolic Array Accelerator
+
+A parameterized **Output-Stationary Pipelined Systolic Array GEMM Accelerator** implemented in SystemVerilog.
+
+This project implements two systolic-array architectures with different operand-forwarding strategies:
+
+- **Stage-0 Forwarding:** operands are forwarded directly from Stage-0 registers.
+- **Stage-1 Forwarding:** operands are forwarded through additional Stage-1 registers.
+
+Both architectures support signed arithmetic, valid signalling, accumulation, and parameterized data widths. Both have been functionally verified through simulation.
+
+---
+
+## 1. Architecture Overview
+
+The accelerator performs General Matrix Multiplication (GEMM) using an output-stationary systolic array.
+
+The architecture consists of processing elements (PEs) arranged in a two-dimensional grid.
+
+### High-Level Dataflow
+
+```text
+                  A OPERANDS
+                      |
+                      v
+              +---------------+
+              |    PE (0,0)   | -----> PE (0,1) -----> ...
+              +---------------+
+                      |
+                      v
+              +---------------+
+              |    PE (1,0)   | -----> PE (1,1) -----> ...
+              +---------------+
+                      |
+                      v
+                     ...
+                      ^
+                      |
+                  B OPERANDS
+```
+
+- A operands propagate from left to right.
+- B operands propagate from top to bottom.
+- Each PE performs multiply-accumulate operations.
+- Each PE maintains its partial sum locally.
+- The final accumulator values represent the output matrix.
+
+---
+
+## 2. Processing Element (PE)
+
+The PE is the fundamental computational unit of the accelerator.
+
+Each PE contains two logical pipeline stages.
+
+### PE Pipeline
+
+```text
+             A Input       B Input
+                |             |
+                v             v
+          +-----------------------+
+          |       Stage 0         |
+          |                       |
+          |  Input Capture        |
+          |  Product Generation   |
+          +-----------+-----------+
+                      |
+                      v
+          +-----------------------+
+          |       Stage 1         |
+          |                       |
+          |  Accumulation         |
+          |  Operand Forwarding   |
+          +-----------+-----------+
+                      |
+                      v
+                  ACC_OUT
+```
+
+### PE Features
+
+- Signed arithmetic.
+- Independent A and B operand widths.
+- Parameterized accumulator width.
+- Input valid signalling.
+- Accumulator clear.
+- Active-low reset.
+- Overflow detection.
+- Operand forwarding.
+
+### PE Interface
+
+The PE uses separate valid signals for the A and B operands. A multiplication is accepted when both operands are valid in the same cycle.
+
+The accumulator and pipeline registers are managed independently, so transaction boundaries and in-flight operations must be handled carefully.
+
+---
+
+## 3. Systolic Array
+
+The PE is replicated to construct a parameterized two-dimensional systolic array.
+
+### Example: 2 × 2 Array
+
+```text
+                 B0              B1
+                  |               |
+                  v               v
+A0 ----------> PE(0,0) -------> PE(0,1)
+                  |               |
+                  v               v
+A1 ----------> PE(1,0) -------> PE(1,1)
+```
+
+### Data Propagation
+
+| Operand | Direction | Purpose |
+|---|---|---|
+| A | Left to right | Supplies row operands |
+| B | Top to bottom | Supplies column operands |
+| Partial sum | Local to each PE | Maintains output accumulation |
+
+Each PE is responsible for one output matrix element.
+
+The array exposes its accumulator values through flattened output buses, along with corresponding valid signals.
+
+---
+
+## 4. Operand-Forwarding Architectures
+
+Two implementations are available in the repository.
+
+### 4.1 Stage-0 Forwarding
+
+**Modules:**
+- `pe_overflow_forwarding`
+- `systolic_array_forwarding`
+
+In this implementation, operands are forwarded directly from the Stage-0 registers.
+
+```text
+Input
+  |
+  v
++------------------+
+| Stage-0 Registers|
++--------+---------+
+         |
+         +--------------------> Next PE
+         |
+         v
++------------------+
+| Stage-1          |
+| Accumulation     |
++------------------+
+```
+
+Operand forwarding is implemented using combinational assignments from the Stage-0 registers:
+
+```systemverilog
+assign a_out       = a_01;
+assign a_out_valid = a_01_valid;
+
+assign b_out       = b_01;
+assign b_out_valid = b_01_valid;
+```
+
+**Characteristics:**
+- One-cycle operand propagation between neighbouring PEs.
+- No additional registered forwarding stage.
+- Lower measured cycle latency in the current simulation.
+- Potentially longer combinational paths between sequential elements.
+
+### 4.2 Stage-1 Forwarding
+
+**Modules:**
+- `pe_overflow`
+- `systolic_array`
+
+In this implementation, operands pass through an additional registered Stage-1 forwarding path.
+
+```text
+Input
+  |
+  v
++------------------+
+| Stage-0 Registers|
++--------+---------+
+         |
+         v
++------------------+
+| Stage-1 Registers|
++--------+---------+
+         |
+         +--------------------> Next PE
+         |
+         v
++------------------+
+| Accumulation     |
++------------------+
+```
+
+**Characteristics:**
+- Two-cycle operand propagation between neighbouring PEs.
+- Additional registered forwarding stage.
+- Higher measured cycle latency in the current simulation.
+- Additional pipeline isolation, which may help timing closure.
+
+---
+
+## 5. Architecture Comparison
+
+| Feature | Stage-0 Forwarding | Stage-1 Forwarding |
+|---|---|---|
+| PE module | `pe_overflow_forwarding` | `pe_overflow` |
+| Array module | `systolic_array_forwarding` | `systolic_array` |
+| Forwarding source | Stage-0 registers | Stage-1 registers |
+| PE-to-PE hop | 1 cycle | 2 cycles |
+| Row input skew | `r` cycles | `2r` cycles |
+| Column input skew | `c` cycles | `2c` cycles |
+| Additional forwarding register | No | Yes |
+| Functional GEMM | Verified | Verified |
+
+### Microarchitectural Trade-off
+
+**Stage-0 Forwarding**
+- Reduces operand propagation latency.
+- Produces lower cycle-level latency in the current test configuration.
+- May introduce longer combinational paths.
+
+**Stage-1 Forwarding**
+- Adds an extra registered forwarding stage.
+- Increases cycle-level latency.
+- May improve timing isolation and maximum achievable frequency.
+
+Lower cycle latency does not necessarily mean better synthesized hardware. Both implementations must eventually be compared using timing and resource utilization reports.
+
+---
+
+## 6. Mathematical Equations
+
+This section consolidates all mathematical definitions and performance equations used in the project.
+
+### 6.1 GEMM Definition
+
+The accelerator performs matrix multiplication.
+
+**Input matrices:**
+
+- Matrix A: dimensions M × K.
+- Matrix B: dimensions K × N.
+- Output matrix C: dimensions M × N.
+
+The matrix multiplication is defined as:
+
+$$
+C = A \times B
+$$
+
+Each output element is:
+
+$$
+C_{i,j} =
+\sum_{k=0}^{K-1}
+A_{i,k}B_{k,j}
+$$
+
+### 6.2 PE Multiply-Accumulate Operation
+
+Each PE performs a multiply-accumulate operation:
+
+$$
+P = A \times B
+$$
+
+$$
+ACC_{new} = ACC_{old} + P
+$$
+
+For a complete output element:
+
+$$
+ACC_{i,j} =
+\sum_{k=0}^{K-1}
+A_{i,k}B_{k,j}
+$$
+
+The accumulator remains local to its corresponding PE.
+
+### 6.3 Number of Processing Elements
+
+For an array with NR rows and NC columns:
+
+$$
+N_{PE} = NR \times NC
+$$
+
+For a 2 × 2 array:
+
+$$
+N_{PE} = 2 \times 2 = 4
+$$
+
+### 6.4 Operand Width and Accumulator Width
+
+The product width is determined by the operand widths:
+
+$$
+PRODW = DW_A + DW_B
+$$
+
+The accumulator width must satisfy:
+
+$$
+ACCW \geq DW_A + DW_B
+$$
+
+Where:
+
+- DW_A = A operand width.
+- DW_B = B operand width.
+- PRODW = product width.
+- ACCW = accumulator width.
+
+The actual accumulator width should also account for the required numerical range across all accumulated products.
+
+### 6.5 Operand Propagation and Skew
+
+For a PE at row r and column c:
+
+**Stage-0 Forwarding**
+
+A operand propagation:
+
+$$
+T_A(r) = r
+$$
+
+B operand propagation:
+
+$$
+T_B(c) = c
+$$
+
+Combined input skew:
+
+$$
+T_{skew}(r,c) = r+c
+$$
+
+**Stage-1 Forwarding**
+
+A operand propagation:
+
+$$
+T_A(r) = 2r
+$$
+
+B operand propagation:
+
+$$
+T_B(c) = 2c
+$$
+
+Combined input skew:
+
+$$
+T_{skew}(r,c) = 2r+2c
+$$
+
+These equations describe the input alignment offsets for the two forwarding architectures.
+
+### 6.6 Performance Metrics
+
+**Inclusive execution latency**
+
+$$
+Latency = Cycle_{last}-Cycle_{first}+1
+$$
+
+**Execution time**
+
+$$
+T_{exec}=Latency \times T_{clock}
+$$
+
+**Throughput**
+
+$$
+Throughput =
+\frac{Total\ MACs}{Latency}
+$$
+
+Throughput is reported in MACs per cycle.
+
+**Percentage latency improvement**
+
+$$
+Improvement_{latency} =
+\frac{Latency_{reference}-Latency_{new}}
+{Latency_{reference}}
+\times 100
+$$
+
+**Percentage throughput improvement**
+
+$$
+Improvement_{throughput} =
+\frac{Throughput_{new}-Throughput_{reference}}
+{Throughput_{reference}}
+\times 100
+$$
+
+---
+
+## 7. Functional Verification
+
+Both architectures were verified using a 2 × 2 systolic array.
+
+### Simulation Configuration
+
+| Parameter | Value |
+|---|---|
+| Array dimensions | 2 × 2 |
+| K dimension | 2 |
+| A operand width | 8 bits |
+| B operand width | 8 bits |
+| Accumulator width | 32 bits |
+| Arithmetic | Signed |
+| Clock period | 10 ns |
+
+### Transaction 0
+
+**Input matrices**
+
+```text
+A0 = | -3  -1 |
+     |  0   2 |
+
+B0 = | -1   2 |
+     |  1  -3 |
+```
+
+**Expected output**
+
+```text
+C0 = | 2  -3 |
+     | 2  -6 |
+```
+
+### Transaction 1
+
+**Input matrices**
+
+```text
+A1 = |  1   2 |
+     | -2   1 |
+
+B1 = | -2   1 |
+     |  1  -2 |
+```
+
+**Expected output**
+
+```text
+C1 = | 0  -3 |
+     | 5  -4 |
+```
+
+### Cumulative Accumulation
+
+The second transaction was also tested without clearing the existing PE accumulators.
+
+**Expected cumulative result**
+
+```text
+C0 + C1 = |  2  -6 |
+          |  7 -10 |
+```
+
+Both architectures produced the expected numerical results.
+
+---
+
+## 8. Performance Evaluation
+
+Both architectures were evaluated under identical simulation conditions.
+
+### Measurement Configuration
+
+| Parameter | Value |
+|---|---:|
+| Array dimensions | 2 × 2 |
+| K dimension | 2 |
+| Clock period | 10 ns |
+| MAC operations per GEMM | 8 |
+
+The latency measurement includes both the first input cycle and the last output cycle.
+
+Throughput is reported as MAC operations per cycle.
+
+### 8.1 Stage-0 Forwarding
+
+**Single GEMM**
+
+| Metric | Result |
+|---|---:|
+| First input cycle | 9 |
+| Last output cycle | 13 |
+| Latency | 5 cycles |
+| Execution time | 50 ns |
+| Total MACs | 8 |
+| Output valids | 8 |
+| Throughput | 1.6000 MAC/cycle |
+
+**Back-to-Back GEMM**
+
+| Metric | Result |
+|---|---:|
+| First input cycle | 39 |
+| Last output cycle | 45 |
+| Latency | 7 cycles |
+| Execution time | 70 ns |
+| Total MACs | 16 |
+| Output valids | 16 |
+| Throughput | 2.2857 MAC/cycle |
+
+### 8.2 Stage-1 Forwarding
+
+**Single GEMM**
+
+| Metric | Result |
+|---|---:|
+| First input cycle | 9 |
+| Last output cycle | 15 |
+| Latency | 7 cycles |
+| Execution time | 70 ns |
+| Total MACs | 8 |
+| Output valids | 8 |
+| Throughput | 1.1429 MAC/cycle |
+
+**Back-to-Back GEMM**
+
+| Metric | Result |
+|---|---:|
+| First input cycle | 43 |
+| Last output cycle | 51 |
+| Latency | 9 cycles |
+| Execution time | 90 ns |
+| Total MACs | 16 |
+| Output valids | 16 |
+| Throughput | 1.7778 MAC/cycle |
+
+### 8.3 Overall Performance Comparison
+
+| Metric | Stage-0 Forwarding | Stage-1 Forwarding |
+|---|---:|---:|
+| Single GEMM latency | 5 cycles | 7 cycles |
+| Single GEMM execution time | 50 ns | 70 ns |
+| Single GEMM throughput | 1.6000 MAC/cycle | 1.1429 MAC/cycle |
+| Back-to-back latency | 7 cycles | 9 cycles |
+| Back-to-back execution time | 70 ns | 90 ns |
+| Back-to-back throughput | 2.2857 MAC/cycle | 1.7778 MAC/cycle |
+
+### 8.4 Measured Improvement
+
+| Metric | Stage-0 Improvement |
+|---|---:|
+| Single GEMM latency | 28.57% lower |
+| Single GEMM throughput | 40.00% higher |
+| Back-to-back latency | 22.22% lower |
+| Back-to-back throughput | 28.57% higher |
+
+These results represent cycle-level simulation performance for the current 2 × 2 configuration. They do not establish which architecture will achieve better synthesized performance.
+
+Maximum frequency, resource utilization, and timing closure must be evaluated separately.
+
+---
+
+## 9. Back-to-Back Execution and PE Sharing
+
+Back-to-back execution means a new GEMM transaction begins before the previous transaction has completely drained from the array.
+
+In the current implementation, the same PE accumulators are reused. Consequently, the second transaction contributes to the existing accumulated result.
+
+This demonstrates temporal reuse of the same PE resources. It does not yet provide independent accumulator contexts for multiple workloads.
+
+### Temporal Sharing
+
+The same PE resources execute different workloads at different times.
+
+```text
+Time ------------------------------------>
+
+PE Array:     Workload A      Workload B
+              ------------    ------------
+```
+
+### Spatial Partitioning
+
+Different PE groups execute different workloads simultaneously.
+
+```text
++--------------------------------------+
+| Workload A          | Workload B     |
+|                     |                |
+|      16 PEs         |     16 PEs     |
++--------------------------------------+
+```
+
+For example, a 4 × 4 workload and a 2 × 8 workload each require 16 PEs. A 32-PE architecture could theoretically execute both simultaneously, provided the architecture supports independent PE regions, routing, control, and accumulator state.
+
+The current implementation does not yet support this capability.
+
+### Resource Fragmentation
+
+In a dynamically allocated PE array, having enough free PEs does not guarantee that a workload can be mapped efficiently.
+
+Free PEs must also form a suitable connected region with the required dimensions.
+
+This is analogous to fragmentation in memory allocation and will be relevant to the future adaptive scheduler.
+
+---
+
+## 10. Verification Status
+
+### Completed Verification
+
+- [x] Signed GEMM.
+- [x] 2 × 2 systolic array.
+- [x] Stage-0 forwarding.
+- [x] Stage-1 forwarding.
+- [x] A operand propagation.
+- [x] B operand propagation.
+- [x] Valid signal propagation.
+- [x] Accumulation.
+- [x] Back-to-back transactions.
+- [x] Irregular valid timing and bubbles.
+- [x] Accumulator clear.
+- [x] Output correctness.
+- [x] Performance measurement.
+
+### Future Verification
+
+- [ ] Randomized matrices.
+- [ ] Randomized valid patterns.
+- [ ] Larger array dimensions.
+- [ ] Larger K dimensions.
+- [ ] Overflow corner cases.
+- [ ] Reset during operation.
+- [ ] Clear during in-flight operations.
+- [ ] Backpressure.
+- [ ] Assertions.
+- [ ] Functional coverage.
+- [ ] Reference-model scoreboard.
+- [ ] Formal verification of selected blocks.
+
+---
+
+## 11. Development Roadmap
+
+### Stage 1 — Baseline GEMM
+
+**Completed**
+
+- PE implementation.
+- Systolic array implementation.
+- Signed GEMM.
+- Stage-0 and Stage-1 forwarding variants.
+- Functional simulation.
+- Performance comparison.
+
+### Stage 2 — Robust GEMM
+
+**Next development stage**
+
+- Transaction management.
+- Accumulator management.
+- Output collector.
+- Output buffering.
+- Backpressure.
+- Comprehensive verification.
+
+### Stage 3 — Configurable GEMM
+
+- Runtime matrix dimensions.
+- Configurable active PE dimensions.
+- Configurable operand widths.
+- Configurable dataflow.
+- Runtime configuration registers.
+- Multiple workload shapes.
+
+### Stage 4 — Performance Optimization
+
+- Pipeline-depth comparison.
+- Maximum frequency analysis.
+- LUT and FF utilization.
+- DSP utilization.
+- BRAM utilization.
+- Timing closure.
+- Memory bandwidth analysis.
+- PE utilization.
+- Latency and throughput evaluation.
+
+### Stage 5 — Adaptive Accelerator
+
+The GEMM engine will eventually become part of a heterogeneous Arm–FPGA accelerator.
+
+```text
+              Arm N1 Host
+                   |
+                   v
+                 PCIe
+                   |
+                   v
+                 XDMA
+                   |
+                   v
+       +-------------------------+
+       | Workload Characterizer  |
+       +------------+------------+
+                    |
+                    v
+       +-------------------------+
+       | Adaptive Scheduler     |
+       +------------+------------+
+                    |
+                    v
+       +-------------------------+
+       | Configurable Compute   |
+       | Engine / GEMM          |
+       +-------------------------+
+```
+
+The adaptive scheduler will eventually consider:
+
+- Workload shape.
+- Data movement pattern.
+- Chunk size.
+- Buffering strategy.
+- Compute parallelism.
+- DMA configuration.
+- Outstanding requests.
+- Active PE dimensions.
+
+---
+
+## 12. Project Status
+
+| Component | Status |
+|---|---|
+| Parameterized PE | Completed |
+| Signed arithmetic | Completed |
+| Overflow detection | Completed |
+| Stage-0 forwarding | Completed |
+| Stage-1 forwarding | Completed |
+| Parameterized systolic array | Completed |
+| Functional verification | Completed |
+| Back-to-back testing | Completed |
+| Performance comparison | Completed |
+| Transaction management | In progress |
+| Output collector | Planned |
+| Output buffering | Planned |
+| Backpressure | Planned |
+| Runtime-configurable GEMM | Planned |
+| Synthesis and timing analysis | Planned |
+| Adaptive scheduling | Planned |
+| FPGA integration | Planned |
+| Arm–FPGA data movement | Planned |
+| PCIe/XDMA integration | Planned |
+
+---
+
+## 13. Conclusion
+
+This project explores two microarchitectural implementations of an output-stationary systolic GEMM accelerator.
+
+The Stage-0 forwarding implementation provides lower cycle-level latency and higher simulated throughput in the current configuration. The Stage-1 forwarding implementation adds an extra registered forwarding stage, potentially offering better timing isolation.
+
+The final architectural decision will be based on synthesized performance, including frequency, resource utilization, timing, and power—not simulation cycle count alone.
+
+The current GEMM accelerator establishes the computational foundation for the broader objective:
+
+**Adaptive Data-Movement and Accelerator Architecture for Heterogeneous Arm–FPGA Systems.**
