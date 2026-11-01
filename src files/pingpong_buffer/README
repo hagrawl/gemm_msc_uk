@@ -1,7 +1,121 @@
 A ping-pong buffer uses two memory banks: while one bank is being filled with new data, the other can be read by the accelerator. The roles switch when the data is ready.
 
 For your GEMM accelerator, the buffer stores matrix operands and presents them in the required order for the systolic PE array.
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## Write and Read Operations: MODE 0 vs MODE 1
 
+The ping-pong buffer stores incoming matrix elements in **row-major order**, regardless of the selected `MODE`. The `MODE` parameter only determines how the stored matrix is read.
+
+Consider a matrix of dimensions `NR = 3` and `NC = 2`.
+
+### 1. Write Operation (Identical for Both Modes)
+
+Assume the incoming matrix is:
+
+\[
+A =
+\begin{bmatrix}
+10 & 20 \\
+30 & 40 \\
+50 & 60
+\end{bmatrix}
+\]
+
+Elements are written sequentially in row-major order:
+
+| Write Cycle | Input Data | Memory Address |
+|:---:|:---:|:---:|
+| 0 | 10 | 0 |
+| 1 | 20 | 1 |
+| 2 | 30 | 2 |
+| 3 | 40 | 3 |
+| 4 | 50 | 4 |
+| 5 | 60 | 5 |
+
+After all write operations, the memory contains:
+
+| Address | Stored Data |
+|:---:|:---:|
+| 0 | 10 |
+| 1 | 20 |
+| 2 | 30 |
+| 3 | 40 |
+| 4 | 50 |
+| 5 | 60 |
+
+**The write operation and memory organization remain identical for both MODE 0 and MODE 1.**
+
+### 2. Read Operation — MODE 0 (Row-wise)
+
+When `MODE = 0`, the buffer reads one complete row at a time.
+
+Read-address generation:
+
+\[
+\text{Address} = \text{read\_cntr} \times NC + i
+\]
+
+| Read Operation | Memory Addresses | Output Vector |
+|:---:|:---:|:---:|
+| 1 | 0, 1 | [10, 20] |
+| 2 | 2, 3 | [30, 40] |
+| 3 | 4, 5 | [50, 60] |
+
+Output sequence:
+
+```text
+[10, 20] → [30, 40] → [50, 60]
+```
+
+This mode is intended for row-wise matrix access, such as reading the A operand in GEMM.
+
+### 3. Read Operation — MODE 1 (Column-wise)
+
+When `MODE = 1`, the buffer reads one complete column at a time.
+
+Read-address generation:
+
+\[
+\text{Address} = i \times NC + \text{read\_cntr}
+\]
+
+| Read Operation | Memory Addresses | Output Vector |
+|:---:|:---:|:---:|
+| 1 | 0, 2, 4 | [10, 30, 50] |
+| 2 | 1, 3, 5 | [20, 40, 60] |
+
+Output sequence:
+
+```text
+[10, 30, 50] → [20, 40, 60]
+```
+
+This mode is intended for column-wise matrix access, such as reading the B operand in GEMM.
+
+### 4. Comparison
+
+Both modes operate on the same stored matrix, but generate different read-address sequences.
+
+| Feature | MODE 0 | MODE 1 |
+|---|---|---|
+| Write order | Row-major | Row-major |
+| Memory organization | Row-major | Row-major |
+| Read arrangement | Row-wise | Column-wise |
+| Output vector width | NC elements | NR elements |
+| Typical GEMM operand | Matrix A | Matrix B |
+
+**Key takeaway:** The `MODE` parameter changes only the read-address generation and output arrangement. It does not change the incoming write sequence or the internal row-major memory organization.
+
+This allows the same generic ping-pong buffer module to be instantiated twice in the GEMM architecture:
+
+- **A operand buffer:** `MODE = 0` (row-wise reads).
+- **B operand buffer:** `MODE = 1` (column-wise reads).
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # Generic Parameterised Ping-Pong Input Buffer for GEMM
 
 ## Overview
