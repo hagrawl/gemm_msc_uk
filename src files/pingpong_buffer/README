@@ -1,3 +1,452 @@
 A ping-pong buffer uses two memory banks: while one bank is being filled with new data, the other can be read by the accelerator. The roles switch when the data is ready.
 
 For your GEMM accelerator, the buffer stores matrix operands and presents them in the required order for the systolic PE array.
+
+# Generic Parameterised Ping-Pong Input Buffer for GEMM
+
+## Overview
+
+This project implements a generic, parameterised **Ping-Pong Input Buffer** in SystemVerilog for a GEMM (General Matrix Multiplication) accelerator.
+
+The buffer uses two independent memory banks (Ping and Pong) to support continuous data movement. While one bank is being read by the compute subsystem, the other bank can be filled with the next input matrix tile.
+
+The module supports two read configurations:
+
+- **MODE = 0:** Row-wise read, intended for the A matrix.
+- **MODE = 1:** Column-wise read, intended for the B matrix.
+
+Input data is always written in row-major order, irrespective of the selected read mode.
+
+The buffer is designed as a reusable input-storage component. It does not implement systolic-array input skewing or PE scheduling. Those responsibilities belong to the downstream dataflow controller.
+
+---
+
+## Architecture
+
+The module contains two independent memory banks:
+
+- Bank 0 (Ping)
+- Bank 1 (Pong)
+
+Each bank follows the state sequence:
+
+```text
+EMPTY → FILLING → FULL → READING → EMPTY
+```
+
+The write and read sides operate independently.
+
+### Ping-Pong operation
+
+| Bank | Write-side operation | Read-side operation |
+|---|---|---|
+| Bank 0 | Receives a matrix tile | Provides a completed tile |
+| Bank 1 | Receives the next matrix tile | Provides a completed tile |
+
+The roles alternate as banks become available.
+
+### Key features
+
+- Two independent input memory banks.
+- Automatic write-bank selection.
+- Automatic read-bank selection.
+- Row-major input storage.
+- Configurable row-wise or column-wise output.
+- One complete row or column returned per read request.
+- Independent read and write operation.
+- Write and read handshakes.
+- Output backpressure support.
+- Internal generation of tile completion signals.
+- Parameterised matrix dimensions and data width.
+
+---
+
+## Module Configuration
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `DW` | 8 | Width of each matrix element in bits |
+| `MODE` | 0 | Read mode: 0 for row-wise, 1 for column-wise |
+| `NR` | 4 | Number of matrix rows |
+| `NC` | 4 | Number of matrix columns |
+| `TOTAL_ELEMS` | `NR × NC` | Total elements in one matrix tile |
+| `RD_WIDTH` | Depends on MODE | Number of elements returned per read |
+| `RD_COUNT` | Depends on MODE | Number of read requests per tile |
+
+The derived parameters are:
+
+```systemverilog
+TOTAL_ELEMS = NR * NC;
+
+RD_WIDTH = (MODE == 0) ? NC : NR;
+
+RD_COUNT = (MODE == 0) ? NR : NC;
+```
+
+### MODE selection
+
+| Configuration | MODE = 0 | MODE = 1 |
+|---|---|---|
+| Intended matrix | A | B |
+| Input write order | Row-major | Row-major |
+| Output organisation | Row-wise | Column-wise |
+| Elements per read | NC | NR |
+| Reads per tile | NR | NC |
+| Output width | `DW × NC` | `DW × NR` |
+
+For GEMM:
+
+\[
+C_{M\times N}=A_{M\times K}\times B_{K\times N}
+\]
+
+The A buffer can be configured for row-wise access, while the B buffer can be configured for column-wise access.
+
+---
+
+## Interface Description
+
+### Write interface
+
+| Signal | Direction | Description |
+|---|---|---|
+| `wr_valid` | Input | Indicates that input data is available |
+| `wr_ready` | Output | Indicates that the buffer can accept input data |
+| `wr_data` | Input | Input matrix element |
+| `load_done` | Output | One-cycle pulse when a complete tile has been written |
+
+A write occurs when:
+
+```systemverilog
+wr_fire = wr_valid && wr_ready;
+```
+
+Each accepted write stores one matrix element.
+
+The buffer generates `load_done` after accepting the final element of a tile.
+
+### Read request interface
+
+| Signal | Direction | Description |
+|---|---|---|
+| `rd_en` | Input | Requests the next row or column |
+| `rd_req_ready` | Output | Indicates that a completed bank is available and the output can accept a request |
+
+A read request is accepted when:
+
+```systemverilog
+rd_fire = rd_en && rd_req_ready;
+```
+
+### Read response interface
+
+| Signal | Direction | Description |
+|---|---|---|
+| `rd_valid` | Output | Indicates that `rd_data` contains a valid vector |
+| `rd_ready` | Input | Indicates that the downstream module can accept the vector |
+| `rd_data` | Output | Parallel row or column data |
+| `rd_done` | Output | One-cycle pulse when the final vector of a tile is returned |
+
+The output vector is held until the downstream consumer accepts it.
+
+A transfer occurs when:
+
+```systemverilog
+rd_valid && rd_ready
+```
+
+The output is packed as:
+
+```systemverilog
+rd_data[i*DW +: DW]
+```
+
+Element 0 occupies the least significant `DW` bits.
+
+---
+
+## MODE = 0: Row-wise Read
+
+When `MODE=0`, the buffer returns one complete matrix row per read request.
+
+Consider the following 3×2 matrix:
+
+\[
+A=
+\begin{bmatrix}
+5 & 18\\
+31 & 44\\
+57 & 70
+\end{bmatrix}
+\]
+
+The matrix is written in row-major order:
+
+```text
+5 → 18 → 31 → 44 → 57 → 70
+```
+
+The read sequence is:
+
+| Read request | Returned elements |
+|---|---|
+| 1 | 5, 18 |
+| 2 | 31, 44 |
+| 3 | 57, 70 |
+
+The corresponding RTL address calculation is:
+
+```systemverilog
+address = read_cntr * NC + i;
+```
+
+For this configuration:
+
+- `RD_WIDTH = 2`
+- `RD_COUNT = 3`
+- `rd_data` width = 16 bits
+
+### Example simulation output
+
+```text
+PING-PONG BUFFER TEST
+MODE = 0
+MATRIX = 3 x 2
+
+PASS: Writer correctly stalls when both banks are full
+
+PASS: MODE=0 TILE=0 VECTOR=0 DATA=1205
+PASS: MODE=0 TILE=0 VECTOR=1 DATA=2c1f
+PASS: MODE=0 TILE=0 VECTOR=2 DATA=4639
+
+PASS: MODE=0 TILE=1 VECTOR=0 DATA=372a
+PASS: MODE=0 TILE=1 VECTOR=1 DATA=5144
+PASS: MODE=0 TILE=1 VECTOR=2 DATA=6b5e
+
+...
+
+ALL TESTS PASSED
+MODE             = 0
+Tiles written    = 5
+Tiles read       = 5
+Vectors checked  = 15
+```
+
+The hexadecimal values represent the packed output vector. For example:
+
+```text
+DATA = 1205
+```
+
+means:
+
+```text
+Element 0 = 0x05
+Element 1 = 0x12
+```
+
+---
+
+## MODE = 1: Column-wise Read
+
+When `MODE=1`, the buffer returns one complete matrix column per read request.
+
+Consider the same 3×2 matrix:
+
+\[
+B=
+\begin{bmatrix}
+5 & 18\\
+31 & 44\\
+57 & 70
+\end{bmatrix}
+\]
+
+Input data is still written in row-major order:
+
+```text
+5 → 18 → 31 → 44 → 57 → 70
+```
+
+However, the read sequence changes:
+
+| Read request | Returned elements |
+|---|---|
+| 1 | 5, 31, 57 |
+| 2 | 18, 44, 70 |
+
+The corresponding RTL address calculation is:
+
+```systemverilog
+address = i * NC + read_cntr;
+```
+
+For this configuration:
+
+- `RD_WIDTH = 3`
+- `RD_COUNT = 2`
+- `rd_data` width = 24 bits
+
+### Example simulation output
+
+```text
+PING-PONG BUFFER TEST
+MODE = 1
+MATRIX = 3 x 2
+
+...
+
+PASS: MODE=1 TILE=4 VECTOR=0 DATA=cdb399
+PASS: MODE=1 TILE=4 VECTOR=1 DATA=dac0a6
+
+ALL TESTS PASSED
+MODE             = 1
+Tiles written    = 5
+Tiles read       = 5
+Vectors checked  = 10
+```
+
+The hexadecimal values represent packed vectors, with element 0 in the least significant byte.
+
+For example:
+
+```text
+DATA = cdb399
+```
+
+means:
+
+```text
+Element 0 = 0x99
+Element 1 = 0xb3
+Element 2 = 0xcd
+```
+
+---
+
+## Verification
+
+A self-checking SystemVerilog testbench was developed to verify the buffer.
+
+The testbench uses a reference memory model to calculate expected read vectors independently of the DUT's read-address implementation.
+
+### Test configuration
+
+| Parameter | Value |
+|---|---:|
+| Data width | 8 bits |
+| Matrix rows | 3 |
+| Matrix columns | 2 |
+| Number of tiles | 5 |
+| Clock period | 10 ns |
+| Simulation tool | Vivado XSim |
+
+### Verified scenarios
+
+| Test scenario | MODE = 0 | MODE = 1 |
+|---|---|---|
+| Row-wise read | Applicable | N/A |
+| Column-wise read | N/A | Applicable |
+| Row-major input loading | Passed | Passed |
+| Multiple tile operations | Passed | Passed |
+| Both banks full | Passed | Passed |
+| Writer stall | Passed | Passed |
+| Output backpressure | Passed | Passed |
+| Tile completion signalling | Passed | Passed |
+| Reference-model comparison | Passed | Passed |
+
+### Simulation summary
+
+| Metric | MODE = 0 | MODE = 1 |
+|---|---:|---:|
+| Tiles written | 5 | 5 |
+| Tiles read | 5 | 5 |
+| Vectors checked | 15 | 10 |
+| Data mismatches | 0 | 0 |
+| Overall result | PASS | PASS |
+
+Both configurations completed their functional simulations successfully.
+
+**Verification scope:** These results establish functional correctness for the tested configurations and scenarios. Concurrent read/write stress, simultaneous bank-completion events, reset during active operations, and broader parameter testing remain additional verification tasks.
+
+---
+
+## Integration into GEMM
+
+The module is intended to be instantiated twice:
+
+1. A input buffer configured with `MODE=0`.
+2. B input buffer configured with `MODE=1`.
+
+Example instantiation:
+
+```systemverilog
+// A matrix buffer: row-wise output
+
+io_buffer_ping_pong #(
+    .DW(8),
+    .MODE(0),
+    .NR(4),
+    .NC(4)
+) A_buffer (
+    // Connect A matrix write and read interfaces
+);
+
+
+// B matrix buffer: column-wise output
+
+io_buffer_ping_pong #(
+    .DW(8),
+    .MODE(1),
+    .NR(4),
+    .NC(4)
+) B_buffer (
+    // Connect B matrix write and read interfaces
+);
+```
+
+The downstream dataflow controller will manage:
+
+- Input vector timing.
+- Systolic-array skewing.
+- Valid-signal alignment.
+- PE input delivery.
+- Coordination between the A and B operands.
+
+The ping-pong buffer is responsible only for storing matrix tiles and providing the requested row or column vectors.
+
+---
+
+## Implementation Notes
+
+- Memory arrays are intentionally not reset. Only control registers and valid state are reset.
+- This avoids requiring a reset operation across every memory location and helps preserve FPGA memory inference opportunities.
+- The parallel read implementation accesses multiple memory elements in one clock cycle. Actual block RAM inference is not guaranteed and must be checked after synthesis.
+- The current implementation uses fixed compile-time matrix dimensions.
+- The module is designed for simulation-first development, followed by synthesis and FPGA resource evaluation.
+
+---
+
+## Future Improvements
+
+Potential extensions include:
+
+- Concurrent read/write stress verification.
+- Additional reset and corner-case testing.
+- Synchronous block RAM read implementation.
+- Runtime-configurable matrix dimensions.
+- More flexible buffering and tile metadata.
+- Integration with the GEMM dataflow controller.
+- FPGA resource and timing analysis.
+
+---
+
+## Project Context
+
+This input buffer is part of the broader project:
+
+**Adaptive Data-Movement and Accelerator Architecture for Heterogeneous Arm–FPGA Systems**
+
+The immediate objective is to establish a reliable GEMM datapath. The buffer provides the input-storage and matrix-vector access functionality that can later be reused and extended within the adaptive accelerator architecture.
