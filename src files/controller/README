@@ -1,0 +1,22 @@
+A buffer returns:
+[A00, A01]    // Row 0
+[A10, A11]    // Row 1
+
+
+The controller must eventually produce:
+Cycle T0: A00, invalid
+Cycle T1: A01, A10
+Cycle T2: invalid, A11
+
+
+The same principle applies to the B columns.
+
+There are two possible implementation approaches:
+1. Preload and stage: Read all A rows and B columns into controller-local storage, then start the systolic schedule.
+2. Overlapped fetching: Fetch vectors while other vectors are being serialised, using staging registers and independent serializers.
+
+I recommend approach 1 for our first robust implementation. It is easier to verify, makes the timing deterministic, and avoids mixing buffer-fetch control with systolic scheduling.
+The trade-off is additional local storage of approximately:
+M K + K N
+
+operand elements. We can optimise that later if FPGA resources become a concern.
