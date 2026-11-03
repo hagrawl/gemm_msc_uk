@@ -1,0 +1,539 @@
+# GEMM Accelerator Performance Measurement Methodology
+
+## 1. Objective
+
+The purpose of the performance measurement is to compare two systolic-array forwarding architectures:
+
+- **TB1 – Stage-1 forwarding:** PE-to-PE data forwarding occurs through the Stage-1 registered outputs. The testbench uses a two-cycle forwarding-hop schedule.
+- **TB2 – Stage-0 forwarding:** PE-to-PE data forwarding occurs through the Stage-0 registered outputs. The testbench uses a one-cycle forwarding-hop schedule.
+
+Both testbenches measure performance using the same methodology. The objective is to determine how the forwarding architecture affects the end-to-end execution latency and average MAC throughput of the systolic array.
+
+The comparison uses identical:
+- Matrix dimensions.
+- Reduction dimension.
+- Input matrix values.
+- Clock period.
+- Number of transactions.
+- Performance measurement boundaries.
+
+Only the forwarding architecture and its corresponding input schedule differ.
+
+---
+
+## 2. Testbench Configuration
+
+The current performance testbenches use the following configuration:
+
+| Parameter | Value | Description |
+|---|---:|---|
+| `NR` | 2 | Number of rows in matrix A |
+| `NC` | 2 | Number of columns in matrix B |
+| `K` | 2 | Reduction dimension |
+| `DW_r` | 8 | Width of A elements |
+| `DW_c` | 8 | Width of B elements |
+| `ACCW` | 32 | Accumulator width |
+| `CLK_PERIOD_NS` | 10 ns | Clock period |
+| Clock frequency | 100 MHz | Assumed simulation frequency |
+
+The testbenches execute two scenarios:
+
+1. **Single transaction:** One GEMM operation.
+2. **Back-to-back transactions:** Two consecutive GEMM operations.
+
+### 2.1 Input matrices
+
+Both testbenches use the same input matrices.
+
+**Transaction 0**
+
+\[
+A_0 =
+\begin{bmatrix}
+-3 & -1\\
+0 & 2
+\end{bmatrix}
+\]
+
+\[
+B_0 =
+\begin{bmatrix}
+-1 & 2\\
+1 & -3
+\end{bmatrix}
+\]
+
+Expected result:
+
+\[
+C_0 =
+\begin{bmatrix}
+2 & -3\\
+2 & -6
+\end{bmatrix}
+\]
+
+**Transaction 1**
+
+\[
+A_1 =
+\begin{bmatrix}
+1 & 2\\
+-2 & 1
+\end{bmatrix}
+\]
+
+\[
+B_1 =
+\begin{bmatrix}
+-2 & 1\\
+1 & -2
+\end{bmatrix}
+\]
+
+Expected result:
+
+\[
+C_1 =
+\begin{bmatrix}
+0 & -3\\
+5 & -4
+\end{bmatrix}
+\]
+
+For the back-to-back test, the expected accumulated result is:
+
+\[
+C_{\text{total}}=C_0+C_1
+\]
+
+\[
+C_{\text{total}} =
+\begin{bmatrix}
+2 & -6\\
+7 & -10
+\end{bmatrix}
+\]
+
+---
+
+## 3. Total Number of MAC Operations
+
+The first performance metric we establish is the total number of MAC operations expected from the systolic array.
+
+For matrix multiplication:
+
+\[
+C_{M\times N}=A_{M\times K}\times B_{K\times N}
+\]
+
+Each output element requires \(K\) multiply-accumulate operations.
+
+There are \(M\times N\) output elements.
+
+Therefore:
+
+\[
+\boxed{Total\ MACs=M\times N\times K}
+\]
+
+In the testbench, this is calculated using:
+
+```systemverilog
+expected_macs =
+    NR * NC * K * number_of_transactions;
+```
+
+For the current 2×2 configuration with K=2:
+
+**Single transaction**
+
+\[
+Total\ MACs=2\times2\times2=8
+\]
+
+**Two back-to-back transactions**
+
+\[
+Total\ MACs=2\times2\times2\times2=16
+\]
+
+This value is used as the expected number of valid MAC-result events across all PEs.
+
+---
+
+## 4. Measuring Execution Latency
+
+Execution latency is measured from the first valid external input to the last valid output event produced by the systolic array.
+
+Two cycle markers are used:
+
+- `first_input_cycle`
+- `last_output_cycle`
+
+### 4.1 First input cycle
+
+The testbench monitors the external input-valid signals:
+
+```systemverilog
+if (!performance_started &&
+    ((|row_data_valid) || (|col_data_valid))) begin
+
+    first_input_cycle = cycle_counter;
+    performance_started = 1;
+end
+```
+
+The first cycle in which any A-row or B-column input is valid is recorded as the beginning of the execution interval.
+
+For example:
+
+| Cycle | A input valid | B input valid |
+|---:|---|---|
+| 1 | No | No |
+| 2 | Yes | No |
+| 3 | Yes | Yes |
+| 4 | Yes | Yes |
+
+The first input cycle is therefore cycle 2.
+
+The measurement does not begin when the testbench starts. It begins when the accelerator receives its first valid input.
+
+### 4.2 Last output cycle
+
+The testbench monitors the valid signals from all PEs through `c_valid_flat`.
+
+```systemverilog
+if (|c_valid_flat) begin
+    last_output_cycle = cycle_counter;
+end
+```
+
+For a 2×2 systolic array:
+
+| Signal bit | PE |
+|---|---|
+| `c_valid_flat[0]` | PE[0][0] |
+| `c_valid_flat[1]` | PE[0][1] |
+| `c_valid_flat[2]` | PE[1][0] |
+| `c_valid_flat[3]` | PE[1][1] |
+
+Whenever any PE produces a valid accumulated result, the testbench updates `last_output_cycle`.
+
+The final value of this variable corresponds to the last observed valid output event.
+
+This ensures that the measurement includes the propagation and completion time of the final PE result, rather than stopping when the first PE finishes.
+
+### 4.3 Latency calculation
+
+The measured latency is calculated as:
+
+```systemverilog
+measured_latency =
+    last_output_cycle - first_input_cycle + 1;
+```
+
+The `+1` accounts for both the first and last cycles in the inclusive measurement interval.
+
+For example:
+
+```text
+First input cycle = 2
+Last output cycle = 6
+
+Measured latency = 6 - 2 + 1
+                 = 5 cycles
+```
+
+The execution time in nanoseconds is:
+
+\[
+\boxed{Execution\ Time=Measured\ Latency\times Clock\ Period}
+\]
+
+For a 10 ns clock:
+
+\[
+Execution\ Time=5\times10=50\ ns
+\]
+
+The measured latency includes:
+- Initial pipeline fill.
+- Input skew.
+- Computation.
+- Inter-PE propagation.
+- Final pipeline drain.
+
+It is therefore an end-to-end execution latency, not just the latency of an individual PE.
+
+---
+
+## 5. Measuring Average MAC Throughput
+
+Throughput indicates how many MAC operations are completed per clock cycle over the measured execution interval.
+
+The testbench calculates:
+
+```systemverilog
+macs_per_cycle =
+    expected_macs * 1.0 / measured_latency;
+```
+
+Mathematically:
+
+\[
+\boxed{Average\ MAC\ Throughput=
+\frac{Total\ MACs}{Measured\ Latency\ (cycles)}}
+\]
+
+For example, consider:
+
+```text
+Total MAC operations = 8
+Measured latency     = 5 cycles
+```
+
+Then:
+
+\[
+Throughput=\frac{8}{5}
+\]
+
+\[
+\boxed{Throughput=1.6\ MACs/cycle}
+\]
+
+This means the accelerator completes an average of 1.6 MAC operations per clock cycle during the measured execution interval.
+
+This is an average over the complete workload. It does not mean that exactly 1.6 MAC operations occur in every individual clock cycle.
+
+### 5.1 Throughput in MAC/s
+
+Throughput can also be expressed in MAC/s.
+
+\[
+\boxed{MAC/s=MACs/cycle\times Clock\ Frequency}
+\]
+
+At 100 MHz, using the example above:
+
+\[
+MAC/s=1.6\times100,000,000
+\]
+
+\[
+MAC/s=160\ million\ MAC/s
+\]
+
+This is a calculation using the assumed 100 MHz simulation clock. It is not an FPGA-measured operating frequency.
+
+---
+
+## 6. Valid Output Counting and Verification
+
+In addition to measuring latency and throughput, both testbenches count valid output events from each PE.
+
+The testbench maintains:
+
+```systemverilog
+integer total_valid_outputs;
+integer valid_count [0:NUM_PE-1];
+```
+
+Each time a PE asserts its output-valid signal, its counter is incremented.
+
+Conceptually:
+
+```systemverilog
+if (c_valid_flat[monitor_pe]) begin
+
+    valid_count[monitor_pe] =
+        valid_count[monitor_pe] + 1;
+
+    total_valid_outputs =
+        total_valid_outputs + 1;
+
+end
+```
+
+For the current 2×2 array with K=2:
+
+| PE | Expected valid MAC events |
+|---|---:|
+| PE[0][0] | 2 |
+| PE[0][1] | 2 |
+| PE[1][0] | 2 |
+| PE[1][1] | 2 |
+| **Total** | **8** |
+
+For two transactions:
+
+| PE | Expected valid MAC events |
+|---|---:|
+| PE[0][0] | 4 |
+| PE[0][1] | 4 |
+| PE[1][0] | 4 |
+| PE[1][1] | 4 |
+| **Total** | **16** |
+
+The testbench compares the observed number of valid events against the expected number:
+
+```systemverilog
+if (total_valid_outputs != expected_macs) begin
+    $error("MAC output count mismatch");
+end
+```
+
+This check is important because it verifies that the expected number of valid accumulation events was produced.
+
+The output-valid count is a verification metric. It is not itself a throughput metric.
+
+The testbench also checks the numerical results against the reference model. This ensures that the performance measurement is accompanied by functional correctness checks.
+
+---
+
+## 7. Comparing TB1 and TB2
+
+Both testbenches use the same performance measurement equations and boundaries.
+
+The main difference is the forwarding architecture.
+
+### TB1 — Stage-1 forwarding
+
+- Uses `systolic_array`.
+- Instantiates `pe_overflow`.
+- A row \(r\) starts at cycle \(2r\).
+- A column \(c\) starts at cycle \(2c\).
+- The testbench schedule accounts for a two-cycle PE-to-PE forwarding hop.
+
+### TB2 — Stage-0 forwarding
+
+- Uses `systolic_array_forwarding`.
+- Instantiates `pe_overflow_forwarding`.
+- A row \(r\) starts at cycle \(r\).
+- A column \(c\) starts at cycle \(c\).
+- The testbench schedule accounts for a one-cycle PE-to-PE forwarding hop.
+
+### Comparison methodology
+
+| Comparison parameter | TB1 | TB2 |
+|---|---|---|
+| Forwarding stage | Stage 1 | Stage 0 |
+| PE-to-PE hop | 2 cycles | 1 cycle |
+| Matrix dimensions | 2×2 | 2×2 |
+| Reduction dimension | 2 | 2 |
+| Input data | Identical | Identical |
+| Clock period | 10 ns | 10 ns |
+| Performance start | First valid external input | First valid external input |
+| Performance end | Last valid PE output | Last valid PE output |
+| Throughput calculation | Total MACs / latency | Total MACs / latency |
+
+The comparison allows us to evaluate how the forwarding architecture influences total GEMM execution latency and average throughput.
+
+---
+
+## 8. Performance Metrics Reported
+
+The following metrics are useful to report for each test scenario:
+
+| Metric | Unit | Purpose |
+|---|---|---|
+| First input cycle | Cycles | Beginning of execution |
+| Last output cycle | Cycles | Completion of execution |
+| Measured latency | Cycles | End-to-end execution duration |
+| Execution time | ns | Latency at the assumed clock period |
+| Expected MAC operations | MACs | Workload size |
+| Observed valid MAC events | Events | Verification of output activity |
+| Average throughput | MACs/cycle | Average processing rate |
+| Average throughput | MAC/s | Processing rate at the assumed frequency |
+
+For the architecture comparison, report both the single-transaction and back-to-back results.
+
+---
+
+## 9. Important Measurement Limitations
+
+The current performance numbers are simulation-based measurements.
+
+They should be interpreted with the following limitations.
+
+### 9.1 End-to-end throughput versus peak throughput
+
+The current throughput formula is:
+
+\[
+\frac{Total\ MACs}{First\ Input\ to\ Last\ Output\ Latency}
+\]
+
+It includes pipeline fill, input skew, computation, propagation and drain.
+
+It therefore represents **average end-to-end GEMM throughput**, not peak MAC throughput or steady-state throughput.
+
+A separate steady-state measurement can be added later to analyse the sustained processing rate after the pipeline has filled.
+
+### 9.2 Simulation clock versus achieved FPGA frequency
+
+The testbenches use a 10 ns clock period, equivalent to 100 MHz.
+
+This is an assumed simulation clock period. It does not establish that the FPGA implementation can operate at 100 MHz.
+
+The actual FPGA operating frequency must be determined from synthesis and implementation timing reports.
+
+### 9.3 Fairness of architecture comparison
+
+Although TB1 and TB2 use the same measurement methodology, their cycle schedules and forwarding paths differ.
+
+Before publishing final comparative numbers, verify that:
+- Both measurements begin at the first actual accepted input.
+- Both measurements end at the final expected valid MAC event.
+- All expected valid events are counted.
+- Both testbenches use equivalent reset and accumulator-clear conditions.
+- Both testbenches complete the same workload.
+- The performance monitor does not count stale or unrelated valid events.
+
+This ensures that the reported differences are attributable to the architecture and not to inconsistent testbench measurement boundaries.
+
+---
+
+## 10. Future Performance Analysis
+
+The current measurement provides a baseline for comparing the two forwarding architectures.
+
+Further analysis can extend the evaluation in the following areas:
+
+1. **Steady-state throughput:** Measure sustained MAC throughput separately from pipeline fill and drain.
+2. **Scaling:** Repeat the experiments with larger systolic arrays and different reduction dimensions.
+3. **Resource utilisation:** Compare LUT, FF, DSP and BRAM usage after FPGA synthesis.
+4. **Timing analysis:** Record achieved Fmax, WNS and critical-path delay after implementation.
+5. **Resource-performance trade-off:** Compare latency and throughput improvements against additional FPGA resource consumption.
+6. **Baseline architecture:** Compare the systolic array against a resource-shared sequential MAC implementation under equivalent conditions.
+
+These measurements will help establish not only which forwarding architecture completes a workload faster, but also the hardware cost associated with that improvement.
+
+---
+
+## 11. Summary
+
+The current testbenches use an end-to-end performance measurement methodology:
+
+\[
+\boxed{Latency=Last\ Output\ Cycle-First\ Input\ Cycle+1}
+\]
+
+\[
+\boxed{Execution\ Time=Latency\times Clock\ Period}
+\]
+
+\[
+\boxed{Average\ Throughput=\frac{Total\ MACs}{Latency}}
+\]
+
+The total number of expected MAC operations is calculated from the matrix dimensions and number of transactions:
+
+\[
+\boxed{Total\ MACs=NR\times NC\times K\times Transactions}
+\]
+
+The output-valid counters verify the number of completed MAC-result events, while the reference model verifies numerical correctness.
+
+This provides a consistent simulation-level baseline for comparing Stage-1 and Stage-0 forwarding architectures before moving to FPGA resource and timing analysis.
